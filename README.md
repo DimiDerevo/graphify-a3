@@ -406,6 +406,8 @@ graphify parses ~40 programming languages locally with tree-sitter AST, and maps
 
 More for Arma 3:
 
+- **Missions.** A folder with a `description.ext` is a mission. Its `class CfgFunctions` (with the `#include` files) gives the functions, with the paths relative to the mission folder. `execVM`, `preprocessFileLineNumbers`, `compileScript` and `loadFile` with a `.sqf` path give `calls` edges (context `script`) to that script. A function that is called from `init.sqf` and the other mission event scripts gets `entry = mission`.
+- **Functions made in the code.** `TAG_fnc_name = { ... };` (also with `compileFinal`) gives an `sqf_function` node with `defined = assignment` in that file. The calls in the block belong to that function. A `CfgFunctions` function with the same name wins.
 - **Entry points.** A function that the engine or another mod can call gets the `entry` attribute: `preInit` / `postInit`, `xeh`, `config` (a config file calls it: UI events, ACE actions), `readme` (the README files list it as the API), `test`. `GRAPH_REPORT.md` lists the functions without a caller that are not an entry point ("SQF Functions Without a Caller").
 - **CBA events.** `["name", ...] call CBA_fnc_localEvent` (and the other raise functions) gives an `sqf_event` node. `["name", {...}] call CBA_fnc_addEventHandler` gives the edges from the event to the handlers. The `GVAR` / `QGVAR` / `EGVAR` / `QEGVAR` macros give the names.
 - **Engine calls.** In an Intercept plugin, a call of `sqf::line_intersects_surfaces(...)` gives a `calls` edge (context `engine_call`) to an `sqf_engine` node. A call in a lambda counts for the function that holds the lambda.

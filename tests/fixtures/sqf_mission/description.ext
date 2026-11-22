@@ -1,0 +1,6 @@
+author = "Test";
+
+class CfgFunctions
+{
+	#include "scripts\functions.hpp"
+};

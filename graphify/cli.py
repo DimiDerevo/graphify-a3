@@ -5962,9 +5962,12 @@ def dispatch_command(cmd: str) -> None:
                 if _src not in _prune_sources:
                     _prune_sources.append(_src)
             try:
+                from graphify.extractors.sqf import wants_directed as _sqf_directed
                 G = _build_merge(
                     [merged],
                     graph_path=existing_graph_path,
+                    # An SQF corpus is always directed (docs/a3/graph-bugs.md, item 1).
+                    directed=True if _sqf_directed(merged.get("nodes", [])) else None,
                     prune_sources=_prune_sources or None,
                     dedup=not no_dedup,
                     dedup_llm_backend=dedup_backend,
@@ -5999,7 +6002,9 @@ def dispatch_command(cmd: str) -> None:
                 print(f"[graphify extract] {exc}", file=sys.stderr)
                 sys.exit(1)
         else:
-            G = _build([merged], dedup=not no_dedup, dedup_llm_backend=dedup_backend, root=target)
+            from graphify.extractors.sqf import wants_directed as _sqf_directed
+            G = _build([merged], directed=_sqf_directed(merged.get("nodes", [])),
+                       dedup=not no_dedup, dedup_llm_backend=dedup_backend, root=target)
         stages.mark("build")
         # G holds its own copy of every node and edge now. Drop the raw
         # extraction lists so cluster/analyze/export can reuse that memory.

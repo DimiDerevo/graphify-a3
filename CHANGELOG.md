@@ -11,6 +11,9 @@ Full release notes with details on each version: [GitHub Releases](https://githu
 - Feat: **cpp** global writes in an Intercept plugin: `cpp_global` nodes and `writes` edges (INFERRED).
 - Feat: **cli** `graphify callers` and `graphify callees`: the call tree with the call sites, `--depth`, `--kind`, `--relation`. The type uses (parameter and return types) do not count by default.
 - Feat: **report** `min_community_size` in `.graphifyrc`. The SQF bridge edges (`plugin_command`, `handler`, `cfgfunctions`) are not surprising connections.
+- Feat: **sqf** missions: the `CfgFunctions` of `description.ext`, the script loads (`execVM`, `preprocessFileLineNumbers`, `compileScript`, `loadFile`) as `script` edges, and the mission event scripts (`init.sqf`, ...) as entry points.
+- Feat: **sqf** the functions made in the code (`TAG_fnc_name = { ... };`): `sqf_function` nodes with `defined = assignment`, and the calls in the block belong to them.
+- Fix: **sqf** a graph with SQF functions is directed (`update`, `extract`, DD_graph). An undirected graph kept one edge for two functions that call each other, so one of them looked uncalled (docs/a3/graph-bugs.md, item 1).
 - Fix: **sqf** a header comment in the ` * text` style (ACE, CBA) gives a clean description.
 
 ## 0.9.114 (2026-11-20)

@@ -13,7 +13,7 @@ from graphify.extractors.sqf import extract_sqf, refresh_sqf_paths, sqf_project_
 
 MOD = Path(__file__).parent / "fixtures" / "sqf_mod"
 SQF_CONTEXTS = {"call", "external_call", "plugin_command", "handler", "cfgfunctions", "file", "string",
-                "config", "event_raise", "event_handler", "engine_call", "global_write"}
+                "config", "event_raise", "event_handler", "engine_call", "global_write", "script"}
 
 
 def _extract(root: Path, cache: Path) -> dict:
@@ -328,3 +328,84 @@ def test_min_community_size_from_graphifyrc(tmp_path):
     with pytest.raises(ValueError):
         load_graphifyrc(tmp_path)
     assert rc_min_community_size(tmp_path) == 3
+
+
+# ---------------------------------------------------------------- a mission (description.ext)
+
+MISSION = Path(__file__).parent / "fixtures" / "sqf_mission"
+
+
+@pytest.fixture(scope="module")
+def mission_graph(tmp_path_factory) -> dict:
+    return _extract(MISSION.resolve(), tmp_path_factory.mktemp("mission_cache"))
+
+
+def test_mission_cfgfunctions(mission_graph):
+    nodes = _nodes(mission_graph)
+    # The "file" attribute and the default folder (functions/<category>) are relative to the mission.
+    assert nodes["TST_fnc_alpha"]["source_file"] == "scripts/fn_alpha.sqf"
+    assert nodes["TST_fnc_beta"]["source_file"] == "functions/core/fn_beta.sqf"
+    assert nodes["TST_fnc_alpha"]["kind"] == "sqf_function"
+    # init.sqf is a mission event script: the engine runs it.
+    assert nodes["TST_fnc_alpha"]["entry"] == "mission"
+
+
+def test_functions_made_in_the_code(mission_graph):
+    nodes = _nodes(mission_graph)
+    assert nodes["TST_fnc_made"]["defined"] == "assignment"
+    assert nodes["TST_fnc_made"]["source_file"] == "scripts/helpers.sqf"
+    assert nodes["TST_fnc_unused"]["source_location"] == "L4"  # = compileFinal { ... }
+    edges = _edges(mission_graph)
+    # The calls in the { ... } block belong to the function, the rest to the file.
+    assert ("TST_fnc_made", "TST_fnc_alpha", "calls", "call") in edges
+    assert ("TST_fnc_unused", "BIS_fnc_log", "calls", "external_call") in edges
+    assert ("helpers.sqf", "TST_fnc_beta", "calls", "call") in edges
+    assert ("helpers.sqf", "TST_fnc_alpha", "calls", "call") not in edges
+    assert ("TST_fnc_beta", "TST_fnc_made", "calls", "call") in edges
+    assert "TST_fnc_made" not in {n["label"] for n in mission_graph["nodes"] if n.get("kind") == "sqf_external"}
+
+
+def test_script_loads(mission_graph):
+    edges = _edges(mission_graph)
+    assert ("init.sqf", "helpers.sqf", "calls", "script") in edges  # execVM "scripts\helpers.sqf"
+    assert ("init.sqf", "settings.sqf", "calls", "script") in edges  # preprocessFileLineNumbers '...'
+
+
+# ---------------------------------------------------------------- two functions that call each other
+
+def test_mutual_calls_keep_both_directions(tmp_path):
+    """docs/a3/graph-bugs.md, item 1: an undirected graph kept one edge for A -> B and B -> A."""
+    import json
+
+    from graphify.affected import load_graph
+    from graphify.calltree import call_tree, format_call_tree
+    from graphify.extractors.sqf import uncalled_sqf_functions, wants_directed
+    from graphify.watch import _rebuild_code
+
+    mod = tmp_path / "mod"
+    shutil.copytree(MOD, mod)
+    helper = mod / "addons" / "main" / "functions" / "fn_helper.sqf"
+    # TST_main_fnc_init calls helper (fn_init.sqf:11), and now helper calls init back.
+    helper.write_text(helper.read_text(encoding="utf-8") + "[] call TST_main_fnc_init;\n", encoding="utf-8")
+    assert _rebuild_code(mod.resolve(), block_on_lock=True)
+
+    graph_path = mod / "graphify-out" / "graph.json"
+    data = json.loads(graph_path.read_text(encoding="utf-8"))
+    assert data["directed"] is True
+    assert wants_directed(data["nodes"])
+    label = {n["id"]: n["label"] for n in data["nodes"]}
+    pairs = {(label[e["source"]], label[e["target"]]) for e in data["links"] if e.get("context") == "call"}
+    assert ("TST_main_fnc_init", "TST_main_fnc_helper") in pairs
+    assert ("TST_main_fnc_helper", "TST_main_fnc_init") in pairs
+
+    G = load_graph(graph_path)
+    seed = next(n for n, d in G.nodes(data=True) if d.get("label") == "TST_main_fnc_helper")
+    text = format_call_tree(G, call_tree(G, seed, direction="callers"), direction="callers", depth=1)
+    assert "- TST_main_fnc_init [call]" in text
+    assert "TST_main_fnc_helper" not in [lbl for lbl, _ in uncalled_sqf_functions(G)]
+
+
+def test_no_directed_graph_without_sqf():
+    from graphify.extractors.sqf import wants_directed
+
+    assert not wants_directed([{"id": "a", "label": "a()"}, {"id": "b", "kind": "sqf_external"}])

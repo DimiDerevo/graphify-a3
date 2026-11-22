@@ -3126,7 +3126,8 @@ def _rebuild_code(
             _disamb_labels(raw_nodes)
             _qualify_cs_methods(raw_nodes, result.get("edges", []))
             from graphify.extract import RUN_ONLY_EXTRACTION_KEYS as _RUN_ONLY_KEYS
-            _directed = bool((existing_graph_data or {}).get("directed", False))
+            from graphify.extractors.sqf import wants_directed as _sqf_directed
+            _directed = bool((existing_graph_data or {}).get("directed", False)) or _sqf_directed(raw_nodes)
             raw_links = _dedupe_edges(result.get("edges", []))
             candidate_graph_data = {
                 **{
@@ -3248,7 +3249,10 @@ def _rebuild_code(
         # Inherit the existing graph's directed flag (#2342) so `graphify
         # update` can't silently downgrade a directed graph to undirected -
         # build_from_json defaults to directed=False otherwise.
-        G = build_from_json(result, directed=bool((existing_graph_data or {}).get("directed", False)))
+        # An SQF corpus is always directed: two functions that call each other keep both edges.
+        from graphify.extractors.sqf import wants_directed as _sqf_directed
+        G = build_from_json(result, directed=bool((existing_graph_data or {}).get("directed", False))
+                            or _sqf_directed(result.get("nodes", [])))
         candidate_topology = _topology_from_graph(G)
         if existing_graph_data and not legacy_layout:
             try:

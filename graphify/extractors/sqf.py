@@ -70,6 +70,17 @@ _EVENT_RAISERS = frozenset({
 })
 _EVENT_ADDERS = frozenset({"cba_fnc_addeventhandler", "cba_fnc_addeventhandlerargs"})
 _EVENT_CALL = re.compile(r"\bcall\s+(CBA_fnc_\w+)", re.IGNORECASE)
+# A function made in the code: TAG_fnc_name = { ... } (also with compileFinal before the block).
+_INLINE_FUNCTION = re.compile(r"(?<![\w.])([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*?_fnc_\w+)\s*=(?!=)\s*(?:compileFinal\s*)?\{")
+# The script loads: execVM "x.sqf", preprocessFile(LineNumbers) "x.sqf", compileScript ["x.sqf"], loadFile.
+_SCRIPT_LOAD = re.compile(
+    r"""\b(execVM|preprocessFileLineNumbers|preprocessFile|compileScript|loadFile)\s*\[?\s*(?:"([^"]+?\.sqf)"|'([^']+?\.sqf)')""",
+    re.IGNORECASE)
+# The scripts that the engine runs in a mission (lower case).
+_MISSION_EVENT_SCRIPTS = frozenset({
+    "init.sqf", "initserver.sqf", "initplayerlocal.sqf", "initplayerserver.sqf", "onplayerkilled.sqf",
+    "onplayerrespawn.sqf", "initintro.sqf", "exit.sqf", "exitserver.sqf", "onpause.sqf",
+})
 # The CfgFunctions categories and the folders of the test and console functions (lower case).
 _TEST_NAMES = frozenset({"test", "tests", "debug", "console"})
 # The config files that change the SQF part of the graph (lower case).
@@ -123,6 +134,8 @@ class SqfReport:
     unknown_commands: dict[str, set[str]] = field(default_factory=dict)
     events: int = 0
     config_calls: int = 0
+    script_calls: int = 0
+    inline_functions: int = 0
 
 
 # ---------------------------------------------------------------- the per-file pass
@@ -151,7 +164,7 @@ def refresh_sqf_paths(
         if p.suffix.lower() == ".sqf" or p.name.lower() in _SQF_CONFIG_NAMES:
             return True
         # A config file of an addon can call SQF functions (config_calls in sqf_project_pass).
-        return p.suffix.lower() in _CONFIG_SUFFIXES and mod_root_of(p) is not None
+        return p.suffix.lower() in _CONFIG_SUFFIXES and (mod_root_of(p) is not None or mission_root_of(p) is not None)
 
     def registers(p: Path) -> bool:
         if p.suffix.lower() not in _CPP_SUFFIXES:
@@ -451,40 +464,63 @@ def read_functions(mod_root: Path, sqf_lookup: dict[str, Path]) -> tuple[list[Fu
             continue
         else:
             prefix_path, tags = [], roots
-        addon_key = _key(addon_dir) + "/"
-        for tag in tags:
-            tag_name = unquote(tag.attrs.get("tag", tag.name))
-            if tag_name == "ADDON" and "PREFIX" in defines and "COMPONENT" in defines:
-                tag_name = f"{defines['PREFIX']}_{defines['COMPONENT']}"
-            m = re.fullmatch(r"DOUBLES\((\w+),(\w+)\)", tag_name)
-            if m:
-                tag_name = f"{defines.get(m.group(1), m.group(1))}_{defines.get(m.group(2), m.group(2))}"
-            for cat in tag.children:
-                cat_dir = arma_path(cat.attrs["file"], addon_dir, mod_root) if "file" in cat.attrs else None
-                for fn in cat.children:
-                    name = f"{tag_name}_fnc_{fn.name}"
-                    if "file" in fn.attrs:
-                        target = arma_path(fn.attrs["file"], addon_dir, mod_root)
-                    elif cat_dir is not None:
-                        target = cat_dir / f"fn_{fn.name}.sqf"
-                    else:
-                        target = addon_dir / "functions" / cat.name / f"fn_{fn.name}.sqf"
-                    rel = sqf_lookup.get(_key(target)) if target is not None else None
-                    if rel is None:
-                        # The file is somewhere else in the addon: take the only fn_<name>.sqf.
-                        want = f"/fn_{fn.name.lower()}.sqf"
-                        found = [v for k, v in sqf_lookup.items() if k.startswith(addon_key) and k.endswith(want)]
-                        rel = found[0] if len(found) == 1 else None
-                    if rel is None:
-                        missing.append(name)
-                        continue
-                    flags = [f for f in ("preInit", "postInit", "preStart") if fn.attrs.get(f.lower()) == "1"]
-                    functions.append(Function(
-                        name=name, rel=rel, cfg_path=prefix_path + [tag.name, cat.name, fn.name],
-                        cfg_file=cfg, init=", ".join(flags) or None,
-                        description=unquote(fn.attrs["description"]) if "description" in fn.attrs else None,
-                    ))
+        _tag_functions(tags, prefix_path, cfg, addon_dir, mod_root, defines, sqf_lookup, functions, missing)
     return functions, missing
+
+
+def read_mission_functions(mission: Path, sqf_lookup: dict[str, Path]) -> tuple[list[Function], list[str]]:
+    """The functions of the class CfgFunctions of <mission>/description.ext, with its #include files.
+    In a mission, a "file" attribute and the default folder (functions/<category>) are relative to
+    the mission folder."""
+    functions: list[Function] = []
+    missing: list[str] = []
+    ext = mission / "description.ext"
+    try:
+        roots = parse_classes(read_config(ext, mission))
+    except OSError:
+        return functions, missing
+    tags = [t for r in roots if r.name.lower() == "cfgfunctions" for t in r.children]
+    _tag_functions(tags, ["CfgFunctions"], ext, mission, mission, {}, sqf_lookup, functions, missing)
+    return functions, missing
+
+
+def _tag_functions(tags: list[CfgClass], prefix_path: list[str], cfg: Path, addon_dir: Path, mod_root: Path,
+                   defines: dict[str, str], sqf_lookup: dict[str, Path],
+                   functions: list[Function], missing: list[str]) -> None:
+    """The functions of the tag classes of one CfgFunctions (in place: ``functions``, ``missing``)."""
+    addon_key = _key(addon_dir) + "/"
+    for tag in tags:
+        tag_name = unquote(tag.attrs.get("tag", tag.name))
+        if tag_name == "ADDON" and "PREFIX" in defines and "COMPONENT" in defines:
+            tag_name = f"{defines['PREFIX']}_{defines['COMPONENT']}"
+        m = re.fullmatch(r"DOUBLES\((\w+),(\w+)\)", tag_name)
+        if m:
+            tag_name = f"{defines.get(m.group(1), m.group(1))}_{defines.get(m.group(2), m.group(2))}"
+        for cat in tag.children:
+            cat_dir = arma_path(cat.attrs["file"], addon_dir, mod_root) if "file" in cat.attrs else None
+            for fn in cat.children:
+                name = f"{tag_name}_fnc_{fn.name}"
+                if "file" in fn.attrs:
+                    target = arma_path(fn.attrs["file"], addon_dir, mod_root)
+                elif cat_dir is not None:
+                    target = cat_dir / f"fn_{fn.name}.sqf"
+                else:
+                    target = addon_dir / "functions" / cat.name / f"fn_{fn.name}.sqf"
+                rel = sqf_lookup.get(_key(target)) if target is not None else None
+                if rel is None:
+                    # The file is somewhere else in the addon: take the only fn_<name>.sqf.
+                    want = f"/fn_{fn.name.lower()}.sqf"
+                    found = [v for k, v in sqf_lookup.items() if k.startswith(addon_key) and k.endswith(want)]
+                    rel = found[0] if len(found) == 1 else None
+                if rel is None:
+                    missing.append(name)
+                    continue
+                flags = [f for f in ("preInit", "postInit", "preStart") if fn.attrs.get(f.lower()) == "1"]
+                functions.append(Function(
+                    name=name, rel=rel, cfg_path=prefix_path + [tag.name, cat.name, fn.name],
+                    cfg_file=cfg, init=", ".join(flags) or None,
+                    description=unquote(fn.attrs["description"]) if "description" in fn.attrs else None,
+                ))
 
 
 # ---------------------------------------------------------------- the project pass
@@ -515,6 +551,21 @@ def _string_mask(text: str) -> bytearray:
     return mask
 
 
+def _block_end(text: str, mask: bytearray, start: int) -> int | None:
+    """The position of the "}" that closes the "{" at ``start`` (strings skipped), else None."""
+    depth = 0
+    for j in range(start, len(text)):
+        if mask[j]:
+            continue
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+    return None
+
+
 def _array_before(text: str, mask: bytearray, end: int) -> int | None:
     """The start of the array "[...]" just before ``end`` (spaces between), else None."""
     j = end - 1
@@ -542,6 +593,30 @@ def mod_root_of(path: Path) -> Path | None:
         if parts[i].lower() == "addons":
             return Path(*parts[:i])
     return None
+
+
+_MISSION_ROOTS: dict[Path, Path | None] = {}
+
+
+def mission_root_of(path: Path) -> Path | None:
+    """The mission of a file: the nearest folder above it with a description.ext."""
+    folder = path.parent
+    seen: list[Path] = []
+    found: Path | None = None
+    while True:
+        if folder in _MISSION_ROOTS:
+            found = _MISSION_ROOTS[folder]
+            break
+        seen.append(folder)
+        if (folder / "description.ext").is_file():
+            found = folder
+            break
+        if folder.parent == folder:
+            break
+        folder = folder.parent
+    for f in seen:
+        _MISSION_ROOTS[f] = found
+    return found
 
 
 def _relative(path: Path, root: Path) -> Path | None:
@@ -604,6 +679,8 @@ def sqf_project_pass(paths: Sequence[Path], root: Path, all_nodes: list[dict], a
     prefixes: dict[Path, str | None] = {}
     components: dict[Path, str | None] = {}
     mod_roots: list[Path] = []
+    mission_roots: list[Path] = []
+    _MISSION_ROOTS.clear()  # description.ext files can come and go between two builds
 
     def context_of(path: Path) -> tuple[str | None, str | None]:
         """PREFIX of the mod and COMPONENT of the addon of a file (for the macros)."""
@@ -628,6 +705,10 @@ def sqf_project_pass(paths: Sequence[Path], root: Path, all_nodes: list[dict], a
             continue
         sqf_lookup[_key(path)] = rel
         prefix, component = context_of(path)
+        if mod_root_of(path) is None:
+            mission = mission_root_of(path)
+            if mission is not None and mission not in mission_roots:
+                mission_roots.append(mission)
         try:
             texts[rel] = expand_macros(_read(path), prefix, component)
         except OSError:
@@ -645,6 +726,10 @@ def sqf_project_pass(paths: Sequence[Path], root: Path, all_nodes: list[dict], a
         functions_list += found
         report.missing_files += missing
         found, missing = read_prep(mod, prefixes[mod], sqf_lookup)
+        functions_list += found
+        report.missing_files += missing
+    for mission in mission_roots:
+        found, missing = read_mission_functions(mission, sqf_lookup)
         functions_list += found
         report.missing_files += missing
     functions: dict[str, str] = {}  # name lower case -> node id
@@ -677,7 +762,44 @@ def sqf_project_pass(paths: Sequence[Path], root: Path, all_nodes: list[dict], a
             cfg_id = _make_id(_stem_id(cfg_rel), *fn.cfg_path)
             if cfg_id in known_ids:
                 new_edges.append(_edge(cfg_id, fid, "defines", cfg_rel, 1, "cfgfunctions"))
+
+    # The functions made in the code: TAG_fnc_name = { ... }; (common in missions). A CfgFunctions
+    # function of the same name wins. The calls in the { ... } block belong to the function.
+    inline_ranges: dict[Path, list[tuple[int, int, str]]] = {}  # file -> (first line, last line, node id)
+    for rel, text in sorted(texts.items()):
+        clean = strip_comments(text)
+        mask = _string_mask(clean)
+        for m in _INLINE_FUNCTION.finditer(clean):
+            if mask[m.start()]:
+                continue
+            name = m.group(1)
+            open_at = m.end() - 1
+            close_at = _block_end(clean, mask, open_at)
+            if close_at is None:
+                continue
+            first = clean.count("\n", 0, m.start()) + 1
+            last = first + clean.count("\n", m.start(), close_at)
+            low = name.lower()
+            if low not in functions:
+                stem = _stem_id(rel)
+                fid = _make_id(stem, name)
+                functions[low] = fid
+                fn_nodes[low] = _node(fid, name, rel, first, kind="sqf_function", _callable=True,
+                                      defined="assignment")
+                new_nodes.append(fn_nodes[low])
+                new_edges.append(_edge(stem, fid, "contains", rel, first, "file"))
+                report.inline_functions += 1
+            if fn_nodes.get(low, {}).get("source_file") == rel.as_posix():
+                inline_ranges.setdefault(rel, []).append((first, last, functions[low]))
     report.functions = len(functions)
+
+    def owner_at(rel: Path, line: int) -> str:
+        """The node of the code at a line: the innermost function made in the code, else the file owner."""
+        best = None
+        for first, last, fid in inline_ranges.get(rel, ()):
+            if first <= line <= last and (best is None or last - first < best[1] - best[0]):
+                best = (first, last, fid)
+        return best[2] if best else owner[rel]
 
     # The variables made with compile "<command> ...": variable lower case -> command lower case.
     wrappers: dict[str, str] = {}
@@ -690,10 +812,10 @@ def sqf_project_pass(paths: Sequence[Path], root: Path, all_nodes: list[dict], a
     # The uses.
     externals: dict[str, str] = {}
     for rel, text in texts.items():
-        source = owner[rel]
-        seen: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str, str]] = set()
         for tok in tokens(text):
             low = tok.name.lower()
+            source = owner_at(rel, tok.line)
             target, relation, context = None, None, None
             if low in functions:
                 target = functions[low]
@@ -718,7 +840,7 @@ def sqf_project_pass(paths: Sequence[Path], root: Path, all_nodes: list[dict], a
                 report.unknown_commands.setdefault(low, set()).add(rel.as_posix())
             if not target or target == source:
                 continue
-            key = (target, relation)
+            key = (source, target, relation)
             if key in seen:
                 continue
             seen.add(key)
@@ -728,13 +850,15 @@ def sqf_project_pass(paths: Sequence[Path], root: Path, all_nodes: list[dict], a
             new_edges.append(e)
             if context == "call" and rel.name.lower().startswith("xeh_"):
                 entries.setdefault(low, set()).add("xeh")
+            elif context == "call" and rel.name.lower() in _MISSION_EVENT_SCRIPTS:
+                entries.setdefault(low, set()).add("mission")
     report.externals = len(externals)
 
     # The config files of the addons: the code in them (UI events, ACE actions, ...) calls functions.
     for path in sorted({p.resolve() for p in absolute if p.suffix.lower() in _CONFIG_SUFFIXES}):
         name = path.name.lower()
-        if name in ("cfgfunctions.hpp", "xeh_prep.hpp") or name.startswith("script_") \
-                or mod_root_of(path) is None or not path.is_file():
+        if name in ("cfgfunctions.hpp", "xeh_prep.hpp") or name.startswith("script_") or not path.is_file() \
+                or (mod_root_of(path) is None and mission_root_of(path) is None):
             continue
         rel = _relative(path, root)
         if rel is None or _stem_id(rel) not in known_ids:
@@ -753,7 +877,7 @@ def sqf_project_pass(paths: Sequence[Path], root: Path, all_nodes: list[dict], a
                 report.config_calls += 1
 
     # The functions in the README files (the API of the mod, for other mods).
-    for mod in mod_roots:
+    for mod in [*mod_roots, *mission_roots]:
         for md in [*sorted(mod.glob("*.md")), *sorted((mod / "addons").glob("*/*.md"))]:
             try:
                 text = _read(md)
@@ -762,6 +886,28 @@ def sqf_project_pass(paths: Sequence[Path], root: Path, all_nodes: list[dict], a
             for m in IDENT.finditer(text):
                 if m.group().lower() in functions:
                     entries.setdefault(m.group().lower(), set()).add("readme")
+
+    # The scripts that a file runs: execVM "x.sqf", preprocessFileLineNumbers "x.sqf", compileScript ["x.sqf"].
+    # A mission path is relative to the mission folder, a mod path names the addon (\\z\\mod\\addons\\...).
+    for rel, text in texts.items():
+        clean = strip_comments(text)
+        path = (root / rel).resolve()
+        mission = mission_root_of(path) if mod_root_of(path) is None else None
+        base = mission or mod_root_of(path) or path.parent
+        done_scripts: set[str] = set()
+        for m in _SCRIPT_LOAD.finditer(clean):
+            script = m.group(2) or m.group(3)
+            target = arma_path(script, base, base)
+            target_rel = sqf_lookup.get(_key(target)) if target is not None else None
+            if target_rel is None:
+                target_rel = sqf_lookup.get(_key(path.parent / script.replace("\\", "/")))
+            if target_rel is None or target_rel == rel:
+                continue
+            dst = owner.get(target_rel)
+            if dst and dst not in done_scripts:
+                done_scripts.add(dst)
+                new_edges.append(_edge(owner[rel], dst, "calls", rel, clean.count("\n", 0, m.start()) + 1, "script"))
+                report.script_calls += 1
 
     # The CBA events: ["name", ...] call CBA_fnc_localEvent -> the event -> the handlers of
     # ["name", {...}] call CBA_fnc_addEventHandler (the functions in the handler, else its owner).
@@ -1165,6 +1311,16 @@ def _owner_resolver(sf: str, source: bytes, by_line: dict, by_name: dict):
         return resolved[key]
 
     return owner_of
+
+
+def wants_directed(nodes) -> bool:
+    """True when an extraction has SQF functions: its graph must be directed.
+
+    An undirected graph keeps one edge for a pair of nodes, so of two functions that call each
+    other (A -> B and B -> A) only one direction stays, and the other function looks uncalled
+    (docs/a3/graph-bugs.md, item 1).
+    """
+    return any(n.get("kind") == "sqf_function" for n in nodes)
 
 
 _CALLER_RELATIONS = frozenset({"calls", "references", "indirect_call"})
