@@ -2789,6 +2789,8 @@ def _rebuild_code(
                     _add_deleted_source(deleted_in_root)
             from graphify.extractors.terraform import refresh_terraform_paths
             wanted = refresh_terraform_paths(wanted, code_files, changed_paths)
+            from graphify.extractors.sqf import refresh_sqf_paths
+            wanted = refresh_sqf_paths(wanted, code_files, changed_paths)
             if not wanted and not deleted_paths:
                 print("[graphify watch] No tracked code files in change set - skipping rebuild.")
                 return True
@@ -3406,8 +3408,10 @@ def _rebuild_code(
         questions = suggest_questions(G, communities, labels)
         from graphify.report import load_learning_for_report as _llfr
         from graphify.report import load_report_token_cost as _lrtc
+        from graphify.rcfile import rc_min_community_size
         report = generate(G, communities, cohesion, labels, gods, surprises, detection,
                           _lrtc(out), report_root, suggested_questions=questions,
+                          min_community_size=rc_min_community_size(watch_root),
                           built_at_commit=commit, learning=_llfr(out / "graph.json"))
         report_path = out / "GRAPH_REPORT.md"
         # Split back into the tracked (curated) file and the pending

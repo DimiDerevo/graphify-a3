@@ -89,6 +89,7 @@ from graphify.extractors.razor import extract_razor  # noqa: F401
 from graphify.extractors.robot import extract_robot  # noqa: F401
 from graphify.extractors.rust import extract_rust  # noqa: F401
 from graphify.extractors.sln import extract_sln  # noqa: F401
+from graphify.extractors.sqf import engine_call_pass, extract_sqf, global_write_pass, sqf_project_pass  # noqa: F401
 from graphify.extractors.solidity import (  # noqa: F401
     extract_solidity,
     resolve_solidity_inherited_calls,
@@ -11369,6 +11370,7 @@ _DISPATCH: dict[str, Any] = {
     ".cshtml": extract_razor,
     ".robot": extract_robot,
     ".resource": extract_robot,
+    ".sqf": extract_sqf,
     ".cls": extract_apex,
     ".trigger": extract_apex,
 }
@@ -12339,6 +12341,8 @@ def extract(
             continue
         if len(_res.get("nodes", [])) != 1:
             continue
+        if _p.suffix.lower() == ".sqf":
+            continue  # the SQF project pass below adds the symbols of the file
         try:
             _size = _p.stat().st_size
             if not _p.read_text(encoding="utf-8", errors="ignore").strip():
@@ -14051,6 +14055,29 @@ def extract(
         _df = _item.get("definition_file")
         if _df and "\\" in str(_df):
             _item["definition_file"] = PurePath(_df).as_posix()
+
+    # SQF (Arma 3): the functions, the plugin commands and their edges come from the
+    # configs of the whole mod, so one pass over the final extraction adds them (the
+    # ids and source_file values are relative to the scan root here). See
+    # graphify/extractors/sqf.py.
+    if any(Path(p).suffix.lower() == ".sqf" for p in paths):
+        try:
+            sqf_project_pass(paths, root, all_nodes, all_edges, resolution_context_nodes)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("SQF project pass failed, skipping: %s", exc)
+    # Intercept plugins: the C++ calls of the SQF engine commands (sqf::*).
+    if any(Path(p).suffix.lower() in (".cpp", ".cc", ".cxx") for p in paths):
+        try:
+            engine_call_pass(paths, root, all_nodes, all_edges)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("SQF engine call pass failed, skipping: %s", exc)
+        try:
+            global_write_pass(paths, root, all_nodes, all_edges)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("C++ global write pass failed, skipping: %s", exc)
 
     _stamp_cpp_condition_provenance(all_nodes, all_edges)
 

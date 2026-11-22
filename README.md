@@ -402,6 +402,17 @@ The server also exposes PR tooling (`list_prs`, `get_pr_impact`, `triage_prs`) s
 
 graphify parses ~40 programming languages locally with tree-sitter AST, and maps docs, PDFs, images, and audio/video through an optional semantic pass. Full list: **[Supported inputs](https://docs.graphify.com/concepts/supported-inputs)**.
 
+**Arma 3 (SQF).** This fork reads the `.sqf` files of an Arma 3 mod without an LLM. The functions come from `CfgFunctions` (tags, categories, `file` attributes, CBA macros) and from the CBA / ACE `XEH_PREP.hpp` files. The graph gets the `calls` edges between the functions, `sqf_external` nodes for the functions of other mods (CBA, BIS, ACE), and the Intercept plugin commands (`register_sqf_command`) with `references` edges to their C++ handlers. `graphify update` knows this part too: a change of a `.sqf` file, of a config file or of the plugin commands extracts the SQF part again. The code is in `graphify/extractors/sqf.py`.
+
+More for Arma 3:
+
+- **Entry points.** A function that the engine or another mod can call gets the `entry` attribute: `preInit` / `postInit`, `xeh`, `config` (a config file calls it: UI events, ACE actions), `readme` (the README files list it as the API), `test`. `GRAPH_REPORT.md` lists the functions without a caller that are not an entry point ("SQF Functions Without a Caller").
+- **CBA events.** `["name", ...] call CBA_fnc_localEvent` (and the other raise functions) gives an `sqf_event` node. `["name", {...}] call CBA_fnc_addEventHandler` gives the edges from the event to the handlers. The `GVAR` / `QGVAR` / `EGVAR` / `QEGVAR` macros give the names.
+- **Engine calls.** In an Intercept plugin, a call of `sqf::line_intersects_surfaces(...)` gives a `calls` edge (context `engine_call`) to an `sqf_engine` node. A call in a lambda counts for the function that holds the lambda.
+- **Global writes.** In an Intercept plugin, `x = ...`, `x++`, `x[i] = ...` and `x.push_back(...)` on a namespace-level variable give a `writes` edge (INFERRED) to a `cpp_global` node. A local variable, a parameter or a class field with the same name hides the global.
+- **Call trees.** `graphify callers "X"` and `graphify callees "X"` print the tree with the file and the line of each call: `--depth N` (0: no limit), `--kind K` (for example `--kind sqf_engine --kind cpp_global`).
+- **Report.** The `plugin_command`, `handler` and `cfgfunctions` edges are not "surprising connections". `min_community_size=10` in `.graphifyrc` hides the small communities in the report.
+
 ---
 
 ## Common commands

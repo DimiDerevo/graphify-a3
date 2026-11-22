@@ -155,6 +155,12 @@ def god_nodes(G: nx.Graph, top_n: int = 10,
     return result
 
 
+# Edge contexts that join two layers by design, so they are never a surprise:
+# an SQF function and the Intercept plugin command it uses, a plugin command and
+# its C++ handler, a CfgFunctions class and its SQF function (extractors/sqf.py).
+_EXPECTED_BRIDGE_CONTEXTS = frozenset({"plugin_command", "handler", "cfgfunctions"})
+
+
 def surprising_connections(
     G: nx.Graph,
     communities: dict[int, list[str]] | None = None,
@@ -350,6 +356,8 @@ def _cross_file_surprises(G: nx.Graph, communities: dict[int, list[str]], top_n:
         relation = data.get("relation", "")
         if relation in ("imports", "imports_from", "contains", "method"):
             continue
+        if data.get("context") in _EXPECTED_BRIDGE_CONTEXTS:
+            continue
         if _is_concept_node(G, u) or _is_concept_node(G, v):
             continue
         if _is_file_node(G, u) or _is_file_node(G, v):
@@ -445,6 +453,8 @@ def _cross_community_surprises(
             continue
         relation = data.get("relation", "")
         if relation in ("imports", "imports_from", "contains", "method"):
+            continue
+        if data.get("context") in _EXPECTED_BRIDGE_CONTEXTS:
             continue
         # This edge crosses community boundaries - interesting
         confidence = data.get("confidence", "EXTRACTED")

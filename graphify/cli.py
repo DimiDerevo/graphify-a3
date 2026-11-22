@@ -2410,6 +2410,75 @@ def dispatch_command(cmd: str) -> None:
                 seed=seed,
             )
         )
+    elif cmd in ("callers", "callees"):
+        usage = (f"Usage: graphify {cmd} \"<node-or-label>\" [--depth N] [--kind K] "
+                 "[--relation R] [--graph path]")
+        if len(sys.argv) < 3 or sys.argv[2].startswith("--"):
+            print(usage, file=sys.stderr)
+            sys.exit(1)
+        from graphify.affected import load_graph, resolve_seed_outcome
+        from graphify.calltree import CALL_RELATIONS, TYPE_CONTEXTS, call_tree, format_call_tree
+        query = sys.argv[2]
+        graph_path = _default_graph_path()
+        depth = 1
+        kinds: list[str] = []
+        relations: list[str] = []
+        args = sys.argv[3:]
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            name, has_eq, inline = arg.partition("=")
+            if name in ("--graph", "--depth", "--kind", "--relation"):
+                if has_eq:
+                    value = inline
+                    i += 1
+                elif i + 1 < len(args):
+                    value = args[i + 1]
+                    i += 2
+                else:
+                    print(f"error: {name} needs a value", file=sys.stderr)
+                    sys.exit(1)
+                if name == "--graph":
+                    graph_path = value
+                elif name == "--depth":
+                    try:
+                        depth = int(value)
+                    except ValueError:
+                        depth = -1
+                    if depth < 0:
+                        print("error: --depth must be an integer, 0 or more (0: no limit)", file=sys.stderr)
+                        sys.exit(1)
+                elif name == "--kind":
+                    kinds.append(value)
+                else:
+                    relations.append(value)
+            else:
+                i += 1
+        gp = Path(graph_path).resolve()
+        if not gp.exists():
+            print(f"error: graph file not found: {gp}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            graph = load_graph(gp)
+        except Exception as exc:
+            print(f"error: could not load graph: {exc}", file=sys.stderr)
+            sys.exit(1)
+        from graphify.paths import GRAPHIFY_OUT_NAME
+        graph_root = gp.parent.parent if gp.parent.name == GRAPHIFY_OUT_NAME else gp.parent
+        seed, rivals = resolve_seed_outcome(graph, query, graph_root)
+        if seed is None:
+            if rivals:
+                from graphify.serve import _ambiguity_message
+                print(_ambiguity_message(graph, query, rivals), file=sys.stderr)
+                sys.exit(EXIT_AMBIGUOUS)
+            print(f"No unique node match for {query}", file=sys.stderr)
+            sys.exit(EXIT_NOT_FOUND)
+        # An explicit --relation follows every edge of that relation; the default
+        # set leaves out the type uses (parameter and return types, ...).
+        tree = call_tree(graph, seed, direction=cmd, depth=depth,
+                         relations=relations or CALL_RELATIONS,
+                         skip_contexts=() if relations else TYPE_CONTEXTS)
+        print(format_call_tree(graph, tree, direction=cmd, depth=depth, kinds=kinds))
     elif cmd in ("god-nodes", "god_nodes"):
         # god_nodes has long been an analyzer (analyze.py), an MCP tool, and a
         # README-advertised capability, but never a CLI subcommand — `graphify
@@ -3088,7 +3157,7 @@ def dispatch_command(cmd: str) -> None:
         _model_arg = next((a for a in sys.argv if a.startswith("--model=")), None)
         label_model = _model_arg.split("=", 1)[1] if _model_arg else None
         _min_cs_arg = next((a for a in sys.argv if a.startswith("--min-community-size=")), None)
-        min_community_size = int(_min_cs_arg.split("=")[1]) if _min_cs_arg else 3
+        min_community_size = int(_min_cs_arg.split("=")[1]) if _min_cs_arg else None
         args = sys.argv[2:]
         watch_path: Path | None = None
         graph_override: Path | None = None
@@ -3424,10 +3493,13 @@ def dispatch_command(cmd: str) -> None:
             sys.exit(1)
         tokens = label_token_usage
         from graphify.report import load_learning_for_report as _llfr
+        from graphify.rcfile import rc_min_community_size as _rc_min_cs
         report = generate(G, communities, cohesion, labels, gods, surprises,
                           {"warning": "cluster-only mode — file stats not available"},
                           tokens, str(watch_path), suggested_questions=questions,
-                          min_community_size=min_community_size, built_at_commit=_commit,
+                          min_community_size=(min_community_size if min_community_size is not None
+                                              else _rc_min_cs(watch_path)),
+                          built_at_commit=_commit,
                           learning=_llfr(out / "graph.json"))
         (out / "GRAPH_REPORT.md").write_text(report, encoding="utf-8")
         stages.mark("report")
@@ -5035,6 +5107,11 @@ def dispatch_command(cmd: str) -> None:
         if incremental_mode:
             from graphify.extractors.terraform import refresh_terraform_paths
             code_files = refresh_terraform_paths(
+                code_files, [Path(p) for p in files_by_type.get("code", [])],
+                [Path(p) for p in [*deleted_files, *excluded_files, *graph_stale_sources]],
+            )
+            from graphify.extractors.sqf import refresh_sqf_paths
+            code_files = refresh_sqf_paths(
                 code_files, [Path(p) for p in files_by_type.get("code", [])],
                 [Path(p) for p in [*deleted_files, *excluded_files, *graph_stale_sources]],
             )

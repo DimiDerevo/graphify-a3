@@ -416,6 +416,19 @@ def generate(
         if amb_pct > 20:
             lines.append(f"- **High ambiguity: {amb_pct}% of edges are AMBIGUOUS.** Review the Ambiguous Edges section above.")
 
+    # --- SQF (Arma 3): functions without a caller that are not an entry point ---
+    if any(d.get("kind") == "sqf_function" for _, d in G.nodes(data=True)):
+        from graphify.extractors.sqf import uncalled_sqf_functions
+        uncalled = uncalled_sqf_functions(G)
+        if uncalled:
+            lines += ["", "## SQF Functions Without a Caller",
+                      f"{len(uncalled)} function(s): no call, no reference, and not an entry point "
+                      "(preInit / postInit, XEH, config, README, test). They can be dead code, "
+                      "or a name made in the code calls them."]
+            lines += [f"- `{label}` - {source}" for label, source in uncalled[:50]]
+            if len(uncalled) > 50:
+                lines.append(f"- (+{len(uncalled) - 50} more)")
+
     # --- Work-memory lessons (derived overlay) ---
     # Preferred sources come from the .graphify_learning.json sidecar; the
     # query-scoped dead-ends come from the reflect aggregate. Section omitted

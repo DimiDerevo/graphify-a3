@@ -2,6 +2,17 @@
 
 Full release notes with details on each version: [GitHub Releases](https://github.com/Graphify-Labs/graphify/releases)
 
+## Unreleased (graphify-a3 fork)
+
+- Feat: **sqf** Arma 3 SQF extraction, ported from the DD_graph tool. A `.sqf` file gets a file node. One pass at the end of `extract()` adds the `CfgFunctions` and `XEH_PREP.hpp` functions (`sqf_function`), the `calls` edges between them (the CBA / ACE `FUNC` macros included), the functions of other mods (`sqf_external`), the Intercept plugin commands (`sqf_command`) with their C++ handlers, and `defines` edges from the `CfgFunctions` classes. All mods of one scan share one function namespace. An incremental update extracts the whole SQF part again when a `.sqf` file, a config file or a C++ file with `register_sqf_command` changes.
+- Feat: **sqf** entry points: the `entry` attribute (`preInit`, `postInit`, `xeh`, `config`, `readme`, `test`) and the "SQF Functions Without a Caller" section of `GRAPH_REPORT.md`. The config files of the addons give `calls` edges (context `config`) to the functions that they call.
+- Feat: **sqf** CBA events: `sqf_event` nodes, `event_raise` and `event_handler` edges. The `GVAR` macros expand.
+- Feat: **cpp** Intercept engine calls (`sqf::*`): `sqf_engine` nodes and `engine_call` edges, lambdas included.
+- Feat: **cpp** global writes in an Intercept plugin: `cpp_global` nodes and `writes` edges (INFERRED).
+- Feat: **cli** `graphify callers` and `graphify callees`: the call tree with the call sites, `--depth`, `--kind`, `--relation`. The type uses (parameter and return types) do not count by default.
+- Feat: **report** `min_community_size` in `.graphifyrc`. The SQF bridge edges (`plugin_command`, `handler`, `cfgfunctions`) are not surprising connections.
+- Fix: **sqf** a header comment in the ` * text` style (ACE, CBA) gives a clean description.
+
 ## 0.9.114 (2026-11-20)
 
 Performance work on the extract/build/update pipeline, plus a batch of extractor and build fixes. Every entry marked Perf preserves graph output exactly (byte-identical); the extractor fixes change output and share one AST cache schema bump (see the note at the end).

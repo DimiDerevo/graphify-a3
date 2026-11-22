@@ -9,6 +9,11 @@ One ``key=value`` per line, ``#`` comments, blank lines ignored. Keys:
     Project defaults for the public ``graphify query`` command. Explicit query
     options override these values; absent settings retain budget 2000, depth 2.
 
+``min_community_size=<positive int>``
+    The smallest community that ``GRAPH_REPORT.md`` lists (default 3). The
+    report counts the smaller ones in one line. ``graphify update``, ``watch``
+    and ``cluster-only`` read it; ``--min-community-size=N`` overrides it.
+
 ``language.<ext>=<language | .ext>``
     Treat files with extension ``<ext>`` as the named language for
     classification, extractor dispatch and cross-file resolution (#2961).
@@ -113,10 +118,22 @@ def parse_language_value(value: str) -> str:
         ) from None
 
 
+def rc_min_community_size(root: Path, default: int = 3) -> int:
+    """``min_community_size`` of ``<root>/.graphifyrc``, else ``default``.
+
+    A malformed file gives ``default``: the report must not fail on it.
+    """
+    try:
+        return int(load_graphifyrc(Path(root)).get("min_community_size", default))
+    except (OSError, ValueError):
+        return default
+
+
 def load_graphifyrc(root: Path) -> dict:
     """Parse ``<root>/.graphifyrc``. Returns ``{}`` when absent.
 
-    Returned keys: ``viz_node_limit``, ``query_budget``, ``query_depth`` (ints),
+    Returned keys: ``viz_node_limit``, ``min_community_size``, ``query_budget``,
+    ``query_depth`` (ints),
     and ``languages``
     (``{".inc": ".php", ...}``) — each present only when the file sets it.
     Unknown keys are ignored so a newer graphify's options do not break an
@@ -151,6 +168,17 @@ def load_graphifyrc(root: Path) -> dict:
                 raise ValueError(
                     f"Invalid viz_node_limit in {rc_path} at line {line_num}: {val!r}. "
                     f"Must be a non-negative integer."
+                ) from exc
+        elif key == "min_community_size":
+            try:
+                parsed_val = int(val)
+                if parsed_val <= 0:
+                    raise ValueError("must be a positive integer")
+                cfg["min_community_size"] = parsed_val
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid min_community_size in {rc_path} at line {line_num}: {val!r}. "
+                    f"Must be a positive integer."
                 ) from exc
         elif key in {"query_budget", "query_depth"}:
             requirement = "a positive integer" if key == "query_budget" else "an integer from 1 to 6"
